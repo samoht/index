@@ -15,7 +15,7 @@ module Key = struct
 
   let v () = random_string key_size
 
-  let hash = Hashtbl.hash
+  let hash (x:string) = Hashtbl.hash x
 
   let hash_size = 30
 

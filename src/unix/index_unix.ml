@@ -210,6 +210,11 @@ module IO : Index.IO = struct
 
   let () = assert (String.length current_version = 8)
 
+  external openfile :
+    string -> Unix.open_flag list ->
+    Unix.file_perm -> Unix.file_descr
+    = "unix_open_odirect"
+
   let v ~readonly ~fresh ~generation file =
     let v ~offset ~version raw =
       {
@@ -227,14 +232,14 @@ module IO : Index.IO = struct
     match Sys.file_exists file with
     | false ->
         if readonly then raise RO_Not_Allowed;
-        let x = Unix.openfile file Unix.[ O_CREAT; mode ] 0o644 in
+        let x = openfile file Unix.[ O_CREAT; mode ] 0o644 in
         let raw = Raw.v x in
         Raw.unsafe_set_offset raw 0L;
         Raw.unsafe_set_version raw;
         Raw.unsafe_set_generation raw generation;
         v ~offset:0L ~version:current_version raw
     | true ->
-        let x = Unix.openfile file Unix.[ O_EXCL; mode ] 0o644 in
+        let x = openfile file Unix.[ O_EXCL; mode ] 0o644 in
         let raw = Raw.v x in
         if readonly && fresh then
           Fmt.failwith "IO.v: cannot reset a readonly file"
