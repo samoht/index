@@ -48,10 +48,10 @@ module Entry = struct
 
     type value
 
-    type t = private { key : key; key_hash : int; value : value }
+    type t = private { key : key; key_hash : int; value : value Lazy.t }
     [@@deriving repr]
 
-    val v : key -> value -> t
+    val v : key -> value Lazy.t -> t
 
     val encoded_size : int
 
@@ -64,7 +64,11 @@ module Entry = struct
 
   module Make (K : Key) (V : Value) :
     S with type key := K.t and type value := V.t = struct
-    type t = { key : K.t; key_hash : int; value : V.t } [@@deriving repr]
+    type 'a l = 'a Lazy.t
+
+    let l_t a = Repr.map a (fun l -> lazy l) (fun l -> Lazy.force l)
+
+    type t = { key : K.t; key_hash : int; value : V.t l } [@@deriving repr]
 
     let v key value = { key; key_hash = K.hash key; value }
 
@@ -72,7 +76,7 @@ module Entry = struct
 
     let decode string off =
       let key = K.decode string off in
-      let value = V.decode string (off + K.encoded_size) in
+      let value = lazy (V.decode string (off + K.encoded_size)) in
       { key; key_hash = K.hash key; value }
 
     let encode' key value f =
@@ -85,7 +89,7 @@ module Entry = struct
       f encoded_key;
       f encoded_value
 
-    let encode { key; value; _ } f = encode' key value f
+    let encode { key; value; _ } f = encode' key (Lazy.force value) f
   end
 end
 

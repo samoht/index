@@ -45,7 +45,7 @@ module Make
     let ( > ) a b = compare a b > 0
   end
 
-  let look_around array key key_metric index =
+  let look_around array key key_metric index f =
     let rec search (op : int64 -> int64) curr =
       let i = op curr in
       if i < 0L || i >= Array.length array then raise Not_found
@@ -53,7 +53,7 @@ module Make
         let e = array.(i) in
         let e_metric = Metric.of_entry e in
         if not Metric.(key_metric = e_metric) then raise Not_found
-        else if Key.equal (Entry.to_key e) key then Entry.to_value e
+        else if Key.equal (Entry.to_key e) key then f e
         else (search [@tailcall]) op i
     in
     try search Int64.pred index
@@ -61,7 +61,7 @@ module Make
 
   (** Improves over binary search in cases where the values in some array are
       uniformly distributed according to some metric (such as a hash). *)
-  let interpolation_search array key ~low ~high =
+  let interpolation_search array key ~low ~high f =
     let key_metric = Metric.of_key key in
     (* The core of the search *)
     let rec search low high lowest_entry highest_entry =
@@ -70,8 +70,7 @@ module Make
         Array.pre_fetch array ~low ~high;
         let lowest_entry = Lazy.force lowest_entry in
         if high = low then
-          if Key.(key = Entry.to_key lowest_entry) then
-            Entry.to_value lowest_entry
+          if Key.(key = Entry.to_key lowest_entry) then f lowest_entry
           else raise Not_found
         else
           let lowest_metric = Metric.of_entry lowest_entry in
@@ -88,8 +87,8 @@ module Make
               let e = array.(next_index) in
               let e_metric = Metric.of_entry e in
               if Metric.(key_metric = e_metric) then
-                if Key.(key = Entry.to_key e) then Entry.to_value e
-                else look_around array key key_metric next_index
+                if Key.(key = Entry.to_key e) then f e
+                else look_around array key key_metric next_index f
               else if Metric.(key_metric > e_metric) then
                 (search [@tailcall])
                   Int64.(succ next_index)

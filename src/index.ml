@@ -69,7 +69,7 @@ struct
 
     let to_key { key; _ } = key
 
-    let to_value { value; _ } = value
+    let to_value { value; _ } = Lazy.force value
   end
 
   let entry_sizeL = Int64.of_int Entry.encoded_size
@@ -218,12 +218,14 @@ struct
         IO.v ~fresh:false ~readonly:true ~generation:0L ~fan_size:0L path
       in
       let mem = Tbl.create 0 in
-      iter_io (fun e -> Tbl.replace mem e.key e.value) io;
+      iter_io (fun e -> Tbl.replace mem e.key (Lazy.force e.value)) io;
       Some { io; mem })
     else None
 
   let sync_log_entries ?min log =
-    let add_log_entry (e : Entry.t) = Tbl.replace log.mem e.key e.value in
+    let add_log_entry (e : Entry.t) =
+      Tbl.replace log.mem e.key (Lazy.force e.value)
+    in
     if min = None then Tbl.clear log.mem;
     iter_io ?min add_log_entry log.io
 
@@ -321,7 +323,7 @@ struct
             l "[%s] log file detected. Loading %Ld entries"
               (Filename.basename root) entries);
         let mem = Tbl.create (Int64.to_int entries) in
-        iter_io (fun e -> Tbl.replace mem e.key e.value) io;
+        iter_io (fun e -> Tbl.replace mem e.key (Lazy.force e.value)) io;
         Some { io; mem }
     in
     let generation =
@@ -347,7 +349,7 @@ struct
             let append_io = IO.append log.io in
             iter_io
               (fun e ->
-                Tbl.replace log.mem e.key e.value;
+                Tbl.replace log.mem e.key (Lazy.force e.value);
                 Entry.encode e append_io)
               io;
             IO.flush log.io;
@@ -432,13 +434,13 @@ struct
             if fresh then clear t;
             t)
 
-  let interpolation_search index key =
+  let interpolation_search f index key =
     let hashed_key = K.hash key in
     let low_bytes, high_bytes = Fan.search index.fan_out hashed_key in
     let low, high =
       Int64.(div low_bytes entry_sizeL, div high_bytes entry_sizeL)
     in
-    Search.interpolation_search (IOArray.v index.io) key ~low ~high
+    Search.interpolation_search (IOArray.v index.io) key ~low ~high f
 
   let find_instance t key =
     let find_if_exists ~name ~find db =
@@ -459,13 +461,47 @@ struct
       find_if_exists ~name:"log" ~find:(fun log -> Tbl.find log.mem) t.log
     in
     let find_index () =
-      find_if_exists ~name:"index" ~find:interpolation_search t.index
+      find_if_exists ~name:"index"
+        ~find:(interpolation_search Entry.to_value)
+        t.index
     in
     Semaphore.with_acquire t.rename_lock @@ fun () ->
     match find_log_async () with
     | e -> e
     | exception Not_found -> (
         match find_log () with e -> e | exception Not_found -> find_index ())
+
+  let mem_instance t key =
+    let mem_if_exists ~name ~mem db =
+      match db with
+      | None -> raise Not_found
+      | Some e ->
+          let ans = mem e key in
+          Log.debug (fun l ->
+              l "[%s] found in %s" (Filename.basename t.root) name);
+          ans
+    in
+    let mem_log_async () =
+      mem_if_exists ~name:"log_async"
+        ~mem:(fun log -> Tbl.mem log.mem)
+        t.log_async
+    in
+    let mem_log () =
+      mem_if_exists ~name:"log" ~mem:(fun log -> Tbl.mem log.mem) t.log
+    in
+    let mem_index () =
+      mem_if_exists ~name:"index"
+        ~mem:(interpolation_search (fun _ -> ()))
+        t.index
+    in
+    Semaphore.with_acquire t.rename_lock @@ fun () ->
+    match mem_log_async () with
+    | true -> true
+    | false -> (
+        match mem_log () with
+        | true -> true
+        | false -> (
+            match mem_index () with () -> true | exception Not_found -> false))
 
   let find t key =
     let t = check_open t in
@@ -475,7 +511,7 @@ struct
   let mem t key =
     let t = check_open t in
     Log.info (fun l -> l "[%s] mem %a" (Filename.basename t.root) pp_key key);
-    match find_instance t key with _ -> true | exception Not_found -> false
+    mem_instance t key
 
   let append_buf_fanout fan_out hash buf_str dst_io =
     Fan.update fan_out hash (IO.offset dst_io);
@@ -525,7 +561,7 @@ struct
              ||
              let key = log.(log_i).key in
              not K.(equal key e.key))
-             && filter (e.key, e.value)
+             && filter (e.key, Lazy.force e.value)
             then
              let buf_str = Bytes.sub buf buf_offset Entry.encoded_size in
              append_buf_fanout fan_out e.key_hash
@@ -580,7 +616,7 @@ struct
         let b = Array.make (Tbl.length log.mem) witness in
         Tbl.fold
           (fun key value i ->
-            b.(i) <- Entry.v key value;
+            b.(i) <- Entry.v key (lazy value);
             i + 1)
           log.mem 0
         |> ignore;
@@ -675,7 +711,9 @@ struct
     | Some log -> (
         let exception Found of Entry.t in
         match
-          Tbl.iter (fun key value -> raise (Found (Entry.v key value))) log.mem
+          Tbl.iter
+            (fun key value -> raise (Found (Entry.v key (lazy value))))
+            log.mem
         with
         | exception Found e -> Some e
         | () -> (
@@ -735,7 +773,7 @@ struct
           None
       | `Overcommit_memory, false | `Block_writes, _ ->
           let hook = hook |> Option.map (fun f stage -> f (`Merge stage)) in
-          Some (merge ?hook ~witness:(Entry.v key value) t)
+          Some (merge ?hook ~witness:(Entry.v key (lazy value)) t)
     else None
 
   let replace t key value =
@@ -772,13 +810,17 @@ struct
     | None -> ()
     | Some log ->
         Tbl.iter f log.mem;
-        may (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io) t.index;
+        may
+          (fun (i : index) ->
+            iter_io (fun e -> f e.key (Lazy.force e.value)) i.io)
+          t.index;
         Semaphore.with_acquire t.rename_lock (fun () ->
             (match t.log_async with
             | None -> ()
             | Some log -> Tbl.iter f log.mem);
             may
-              (fun (i : index) -> iter_io (fun e -> f e.key e.value) i.io)
+              (fun (i : index) ->
+                iter_io (fun e -> f e.key (Lazy.force e.value)) i.io)
               t.index)
 
   let close' ~hook ?immediately it =
