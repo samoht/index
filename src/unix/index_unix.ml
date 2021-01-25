@@ -173,7 +173,7 @@ module IO : Index.IO = struct
     match Sys.file_exists file with
     | false ->
         let x = Unix.openfile file Unix.[ O_CREAT; O_CLOEXEC; mode ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v ~readonly x in
         Raw.Offset.set raw 0L;
         Raw.Fan.set_size raw fan_size;
         Raw.Version.set raw current_version;
@@ -181,7 +181,7 @@ module IO : Index.IO = struct
         v ~fan_size ~offset:0L raw
     | true ->
         let x = Unix.openfile file Unix.[ O_EXCL; O_CLOEXEC; mode ] 0o644 in
-        let raw = Raw.v x in
+        let raw = Raw.v ~readonly x in
         if readonly && fresh then
           Fmt.failwith "IO.v: cannot reset a readonly file"
         else if fresh then (

@@ -11,7 +11,7 @@
 type t
 (** The type of [raw] file handles. *)
 
-val v : Unix.file_descr -> t
+val v : readonly:bool -> Unix.file_descr -> t
 (** Construct a [raw] value from a file descriptor. *)
 
 val unsafe_write : t -> off:int64 -> string -> unit

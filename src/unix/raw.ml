@@ -22,32 +22,44 @@ let decode_int64 buf =
   in
   get_uint64 buf 0
 
-type t = { fd : Unix.file_descr } [@@unboxed]
+type buffer =
+  (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 
-let v fd = { fd }
+type t = { fd : Unix.file_descr; buf : buffer }
 
-let really_write fd fd_offset buffer =
-  let rec aux fd_offset buffer_offset length =
-    let w = Syscalls.pwrite ~fd ~fd_offset ~buffer ~buffer_offset ~length in
-    if w = 0 || w = length then ()
-    else
-      (aux [@tailcall])
-        (fd_offset ++ Int64.of_int w)
-        (buffer_offset + w) (length - w)
+let mapsize = 40_960_000_000L
+
+let v ~readonly fd =
+  let buf =
+    Unix.map_file fd Bigarray.Char Bigarray.c_layout (not readonly)
+      [| Int64.to_int mapsize |]
   in
-  aux fd_offset 0 (Bytes.length buffer)
+  let buf = Bigarray.array1_of_genarray buf in
+  { fd; buf }
 
-let really_read fd fd_offset length buffer =
-  let rec aux fd_offset buffer_offset length =
-    let r = Syscalls.pread ~fd ~fd_offset ~buffer ~buffer_offset ~length in
-    if r = 0 then buffer_offset (* end of file *)
-    else if r = length then buffer_offset + r
-    else
-      (aux [@tailcall])
-        (fd_offset ++ Int64.of_int r)
-        (buffer_offset + r) (length - r)
-  in
-  aux fd_offset 0 length
+module Unsafe = struct
+  external blit_bytes_to_bigstring :
+    Bytes.t -> int -> buffer -> int -> int -> unit
+    = "caml_blit_bytes_to_bigstring"
+    [@@noalloc]
+
+  external blit_bigstring_to_bytes :
+    buffer -> int -> Bytes.t -> int -> int -> unit
+    = "caml_blit_bigstring_to_bytes"
+    [@@noalloc]
+end
+
+let really_write t offset buffer =
+  let offset = Int64.to_int offset in
+  let length = Bytes.length buffer in
+  Unsafe.blit_bytes_to_bigstring buffer 0 t.buf offset length
+
+let really_read t offset length buffer =
+  let offset = Int64.to_int offset in
+  let dim = Bigarray.Array1.dim t.buf in
+  let len = min length (dim - offset) in
+  Unsafe.blit_bigstring_to_bytes t.buf offset buffer 0 len;
+  length
 
 let fsync t = Unix.fsync t.fd
 
@@ -57,11 +69,11 @@ let fstat t = Unix.fstat t.fd
 
 let unsafe_write t ~off buf =
   let buf = Bytes.unsafe_of_string buf in
-  really_write t.fd off buf;
+  really_write t off buf;
   Stats.add_write (Bytes.length buf)
 
 let unsafe_read t ~off ~len buf =
-  let n = really_read t.fd off len buf in
+  let n = really_read t off len buf in
   Stats.add_read n;
   n
 
